@@ -1,9 +1,11 @@
-import jinja2
+import logging
 import os
-import webapp2
 
+import jinja2
+import webapp2
 from google.appengine.api import users
 from google.appengine.ext import ndb
+from google.appengine.api import memcache
 
 
 # We set a parent key on the 'Greetings' to ensure that they are all in the same
@@ -18,15 +20,22 @@ jinja_environment = jinja2.Environment(
     extensions=['jinja2.ext.autoescape'],
     autoescape=True)
 
+
 class Greeting(ndb.Model):
     author = ndb.UserProperty()
     content = ndb.StringProperty(indexed=False)
     date = ndb.DateTimeProperty(auto_now_add=True)
 
+
 class MainPage(webapp2.RequestHandler):
     def get(self):
-        greetings_query = Greeting.query(ancestor=guestbook_key()).order(-Greeting.date)
-        greetings = greetings_query.fetch(10)
+        guestbook_name = self.request.get('guestbook_name', 'default_guestbook')
+        greetings = memcache.get('%s:greetings' % guestbook_name)
+        if not greetings:
+            greetings_query = Greeting.query(ancestor=guestbook_key(guestbook_name)).order(-Greeting.date)
+            greetings = greetings_query.fetch(10)
+            if not memcache.set('%s:greetings' % guestbook_name, greetings):
+                logging.error('Memcache set failed in GET.')
 
         if users.get_current_user():
             url = users.create_logout_url(self.request.uri)
@@ -40,15 +49,22 @@ class MainPage(webapp2.RequestHandler):
                                                 url=url,
                                                 url_linktext=url_linktext))
 
+
 class Guestbook(webapp2.RequestHandler):
     def post(self):
-        greeting = Greeting(parent=guestbook_key())
+        guestbook_name = self.request.get('guestbook_name', 'default_guestbook')
+        greeting = Greeting(parent=guestbook_key(guestbook_name))
 
         if users.get_current_user():
             greeting.author = users.get_current_user()
 
         greeting.content = self.request.get('content')
         greeting.put()
+        greetings = memcache.get('%s:greetings' % guestbook_name)
+        if greetings:
+            greetings.append(greeting)
+            if not memcache.set('%s:greetings' % guestbook_name, greetings):
+                    logging.error('Memcache set failed in POST.')
         self.redirect('/')
 
 application = webapp2.WSGIApplication([
